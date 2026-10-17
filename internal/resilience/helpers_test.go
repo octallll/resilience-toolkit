@@ -36,6 +36,8 @@ func mustPanic(t *testing.T, name string, f func()) {
 var allConstructorErrors = []error{
 	resilience.ErrNilClock,
 	resilience.ErrNilPolicy,
+	resilience.ErrNilBackoff,
+	resilience.ErrNilRand,
 	resilience.ErrInvalidCapacity,
 	resilience.ErrInvalidInterval,
 	resilience.ErrInvalidLimit,

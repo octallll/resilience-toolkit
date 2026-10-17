@@ -33,7 +33,7 @@ func NewRetry(clock Clock, cfg RetryConfig) (*Retry, error) {
 	panic("not implemented")
 }
 
-// Do calls op up to MaxAttempts times.
+// Do calls op up to MaxAttempts times. See the task description for the exact rules.
 func (r *Retry) Do(op func() error) error {
 	panic("not implemented")
 }

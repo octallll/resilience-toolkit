@@ -25,6 +25,8 @@ var (
 var (
 	ErrNilClock                 = errors.New("clock is nil")
 	ErrNilPolicy                = errors.New("policy is nil")
+	ErrNilBackoff               = errors.New("backoff is nil")
+	ErrNilRand                  = errors.New("random source is nil")
 	ErrInvalidCapacity          = errors.New("capacity must be positive")
 	ErrInvalidInterval          = errors.New("interval must be positive")
 	ErrInvalidLimit             = errors.New("limit must be positive")
@@ -45,5 +47,8 @@ var (
 //		failIf(capacity <= 0, ErrInvalidCapacity),
 //	)
 func failIf(cond bool, err error) error {
-	panic("not implemented yet")
+	if cond {
+		return err
+	}
+	return nil
 }
