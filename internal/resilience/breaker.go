@@ -74,13 +74,21 @@ func NewCircuitBreaker(clock Clock, cfg Config) (*CircuitBreaker, error) {
 func (c *CircuitBreaker) State() State {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.advance()
+	return c.effective()
+}
+
+// effective returns the state at the current time without changing anything,
+// so merely looking at the breaker never affects it. The caller must hold c.mu.
+func (c *CircuitBreaker) effective() State {
+	if c.state == Open && c.clock.Now().Sub(c.openedAt) >= c.cfg.OpenTimeout {
+		return HalfOpen
+	}
 	return c.state
 }
 
 // advance performs the time-driven Open -> HalfOpen transition. The caller must hold c.mu.
 func (c *CircuitBreaker) advance() {
-	if c.state == Open && c.clock.Now().Sub(c.openedAt) >= c.cfg.OpenTimeout {
+	if c.effective() == HalfOpen && c.state == Open {
 		c.transition(HalfOpen)
 	}
 }
@@ -145,20 +153,15 @@ func (c *CircuitBreaker) after(gen uint64, failed bool) {
 }
 
 // Do runs op unless the circuit is open. op's error is returned as is.
-// A panic inside op counts as a failure and is propagated to the caller.
+// A panic inside op or IsFailure counts as a failure and is propagated to the caller.
 func (c *CircuitBreaker) Do(op func() error) error {
 	gen, ok := c.before()
 	if !ok {
 		return ErrCircuitOpen
 	}
-	finished := false
-	defer func() {
-		if !finished {
-			c.after(gen, true)
-		}
-	}()
+	failed := true // stays true if op or IsFailure panics
+	defer func() { c.after(gen, failed) }()
 	err := op()
-	finished = true
-	c.after(gen, c.cfg.IsFailure(err))
+	failed = c.cfg.IsFailure(err)
 	return err
 }

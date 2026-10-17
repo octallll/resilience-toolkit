@@ -2,14 +2,27 @@ package resilience
 
 import (
 	"errors"
+	"sync"
 	"time"
 )
 
 // Rand is the source of randomness for jitter. Float64 returns a number in [0, 1).
 // *rand.Rand from math/rand/v2 satisfies it. Implementations are not required to be
-// safe for concurrent use, so do not share one Rand between goroutines unless it is.
+// safe for concurrent use: FullJitter and EqualJitter serialize their calls to it.
 type Rand interface {
 	Float64() float64
+}
+
+// lockedRand serializes access to a Rand that may not be goroutine-safe.
+type lockedRand struct {
+	mu  sync.Mutex
+	rnd Rand
+}
+
+func (l *lockedRand) Float64() float64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.rnd.Float64()
 }
 
 func validateJitter(inner Backoff, rnd Rand) error {
@@ -37,7 +50,7 @@ func scale(d time.Duration, f float64) time.Duration {
 // the same moments (a "thundering herd"). Randomness spreads them over time.
 type FullJitter struct {
 	inner Backoff
-	rnd   Rand
+	rnd   lockedRand
 }
 
 // NewFullJitter returns ErrNilBackoff and/or ErrNilRand for nil arguments.
@@ -45,7 +58,7 @@ func NewFullJitter(inner Backoff, rnd Rand) (*FullJitter, error) {
 	if err := validateJitter(inner, rnd); err != nil {
 		return nil, err
 	}
-	return &FullJitter{inner: inner, rnd: rnd}, nil
+	return &FullJitter{inner: inner, rnd: lockedRand{rnd: rnd}}, nil
 }
 
 // Delay asks the inner Backoff for the delay of the same attempt. If that delay is
@@ -63,7 +76,7 @@ func (j *FullJitter) Delay(attempt int) time.Duration {
 // the result is uniform in [d/2, d). It never waits less than half the planned time.
 type EqualJitter struct {
 	inner Backoff
-	rnd   Rand
+	rnd   lockedRand
 }
 
 // NewEqualJitter returns ErrNilBackoff and/or ErrNilRand for nil arguments.
@@ -71,7 +84,7 @@ func NewEqualJitter(inner Backoff, rnd Rand) (*EqualJitter, error) {
 	if err := validateJitter(inner, rnd); err != nil {
 		return nil, err
 	}
-	return &EqualJitter{inner: inner, rnd: rnd}, nil
+	return &EqualJitter{inner: inner, rnd: lockedRand{rnd: rnd}}, nil
 }
 
 // Delay behaves like FullJitter.Delay, but returns d/2 + a random part of the other half.

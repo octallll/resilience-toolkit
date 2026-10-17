@@ -219,6 +219,45 @@ func TestBreaker_PanicCountsAsFailureAndPropagates(t *testing.T) {
 	wantState(t, b, resilience.Open)
 }
 
+// A panicking IsFailure must not leave the breaker stuck: the call counts as a failure,
+// the probe slot is released, and the panic reaches the caller.
+func TestBreaker_PanicInIsFailureCountsAsFailureAndFreesTheProbe(t *testing.T) {
+	clock := resilience.NewFakeClock()
+	b, err := resilience.NewCircuitBreaker(clock, resilience.Config{
+		FailureThreshold:  1,
+		OpenTimeout:       sec,
+		HalfOpenSuccesses: 1,
+		IsFailure: func(err error) bool {
+			if err == errBenign {
+				panic("bad classifier")
+			}
+			return err != nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fail(t, b, 1)
+	clock.Advance(sec)
+	wantState(t, b, resilience.HalfOpen)
+
+	func() {
+		defer func() {
+			if r := recover(); r != "bad classifier" {
+				t.Errorf("recovered %v, want the original panic value", r)
+			}
+		}()
+		_ = b.Do(func() error { return errBenign })
+	}()
+	wantState(t, b, resilience.Open)
+
+	clock.Advance(sec)
+	if err := b.Do(ok); err != nil {
+		t.Fatalf("Do() after the timeout = %v, want nil: the probe slot must have been freed", err)
+	}
+	wantState(t, b, resilience.Closed)
+}
+
 func TestBreaker_ImplementsPolicy(t *testing.T) {
 	var _ resilience.Policy = (*resilience.CircuitBreaker)(nil)
 }

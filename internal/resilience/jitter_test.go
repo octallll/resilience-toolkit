@@ -6,6 +6,8 @@ import (
 	"math"
 	"math/rand/v2"
 	"reflect"
+	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -271,4 +273,39 @@ func TestJitter_ImplementsBackoff(t *testing.T) {
 	var _ resilience.Backoff = (*resilience.FullJitter)(nil)
 	var _ resilience.Backoff = (*resilience.EqualJitter)(nil)
 	var _ resilience.Rand = (*rand.Rand)(nil)
+}
+
+// exclusiveRand fails if two goroutines are ever inside Float64 at the same time.
+type exclusiveRand struct {
+	inside     atomic.Int32
+	violations atomic.Int32
+}
+
+func (r *exclusiveRand) Float64() float64 {
+	if r.inside.Add(1) != 1 {
+		r.violations.Add(1)
+	}
+	runtime.Gosched()
+	r.inside.Add(-1)
+	return 0.5
+}
+
+// Retry is stateless and is naturally shared between goroutines, so jitter must
+// not pass its callers' concurrency on to a Rand that is not goroutine-safe.
+func TestJitter_SerializesCallsToRand(t *testing.T) {
+	for name, build := range map[string]func(resilience.Backoff, resilience.Rand) resilience.Backoff{
+		"full":  func(b resilience.Backoff, r resilience.Rand) resilience.Backoff { return newFullJitter(t, b, r) },
+		"equal": func(b resilience.Backoff, r resilience.Rand) resilience.Backoff { return newEqualJitter(t, b, r) },
+	} {
+		rnd := &exclusiveRand{}
+		j := build(resilience.ConstantBackoff{D: sec}, rnd)
+		runParallel(8, func(int) {
+			for range 200 {
+				j.Delay(1)
+			}
+		})
+		if v := rnd.violations.Load(); v != 0 {
+			t.Errorf("%s: Rand was entered concurrently %d times", name, v)
+		}
+	}
 }

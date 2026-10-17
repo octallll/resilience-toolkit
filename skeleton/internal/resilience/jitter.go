@@ -4,7 +4,7 @@ import "time"
 
 // Rand is the source of randomness for jitter. Float64 returns a number in [0, 1).
 // *rand.Rand from math/rand/v2 satisfies it. Implementations are not required to be
-// safe for concurrent use, so do not share one Rand between goroutines unless it is.
+// safe for concurrent use: FullJitter and EqualJitter must serialize their calls to it.
 type Rand interface {
 	Float64() float64
 }
