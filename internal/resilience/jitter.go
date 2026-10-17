@@ -33,12 +33,17 @@ func validateJitter(inner Backoff, rnd Rand) error {
 }
 
 // scale returns the part f (in [0, 1)) of d. The result is always in [0, d).
+// Numbers outside [0, 1) and NaN are clamped before the float -> int conversion,
+// whose result for out-of-range values depends on the platform.
 func scale(d time.Duration, f float64) time.Duration {
-	r := time.Duration(f * float64(d))
-	if r < 0 {
+	if !(f > 0) { // negative, zero or NaN
 		return 0
 	}
-	if r >= d { // float64 rounding at the very top of the range
+	if f >= 1 {
+		return d - 1
+	}
+	r := time.Duration(f * float64(d)) // f < 1, so the product never exceeds 2^63 - 2^10
+	if r >= d {                        // float64 rounding at the very top of the range
 		return d - 1
 	}
 	return r

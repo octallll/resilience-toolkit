@@ -159,3 +159,17 @@ func TestChain_BreakerOutsideLimiter_RejectionsCountAsFailures(t *testing.T) {
 		t.Fatalf("Do() = %v, want ErrCircuitOpen", err)
 	}
 }
+
+// A policy that rejects the call must not make the chain pay for the policies behind it.
+func TestChain_RejectionDoesNotAllocatePerPolicy(t *testing.T) {
+	reject := resilience.PolicyFunc(func(func() error) error { return errBoom })
+	pass := resilience.PolicyFunc(func(op func() error) error { return op() })
+	c, err := resilience.Chain(reject, pass, pass, pass, pass, pass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := func() error { return nil }
+	if allocs := testing.AllocsPerRun(100, func() { _ = c.Do(op) }); allocs > 1 {
+		t.Errorf("rejected Do allocated %v times, want at most 1", allocs)
+	}
+}

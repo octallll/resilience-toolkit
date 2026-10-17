@@ -176,6 +176,26 @@ func TestJitter_ClampsAMisbehavingRand(t *testing.T) {
 	}
 }
 
+// NaN and infinities are not in [0, 1) either; the result must not depend on how the platform converts them.
+func TestJitter_ClampsNaNAndInfinity(t *testing.T) {
+	odd := []float64{math.NaN(), math.Inf(1), math.Inf(-1)}
+	huge := time.Duration(math.MaxInt64)
+
+	full := newFullJitter(t, resilience.ConstantBackoff{D: huge}, &scriptedRand{values: odd})
+	for i, w := range []time.Duration{0, huge - 1, 0} {
+		if got := full.Delay(1); got != w {
+			t.Errorf("FullJitter.Delay() #%d = %v, want %v", i+1, got, w)
+		}
+	}
+
+	equal := newEqualJitter(t, resilience.ConstantBackoff{D: huge}, &scriptedRand{values: odd})
+	for i, w := range []time.Duration{huge / 2, huge - 1, huge / 2} {
+		if got := equal.Delay(1); got != w {
+			t.Errorf("EqualJitter.Delay() #%d = %v, want %v", i+1, got, w)
+		}
+	}
+}
+
 func TestEqualJitter_StaysInRangeOnAverageThreeQuarters(t *testing.T) {
 	const (
 		d = 10 * sec
