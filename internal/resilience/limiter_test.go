@@ -276,3 +276,41 @@ func TestLimiter_InvalidArguments(t *testing.T) {
 		checkInvalid(t, c.name, err, c.want...)
 	}
 }
+
+// Keys are spread over independently locked shards; the observable behaviour must not depend on it.
+func TestLimiter_ManyKeysAcrossShards(t *testing.T) {
+	const n = 1000
+	clock := resilience.NewFakeClock()
+	l := newLimiter[int](t, clock, 2, sec)
+
+	for k := range n {
+		if !l.Allow(k) {
+			t.Fatalf("Allow(%d) = false, want true", k)
+		}
+	}
+	if got := l.Size(); got != n {
+		t.Fatalf("Size() = %d, want %d", got, n)
+	}
+	for k := range n {
+		if got := l.Tokens(k); got != 1 {
+			t.Fatalf("Tokens(%d) = %d, want 1", k, got)
+		}
+	}
+	if got := l.Sweep(); got != 0 {
+		t.Fatalf("Sweep() with no full buckets = %d, want 0", got)
+	}
+	if got := len(idleKeys(l)); got != 0 {
+		t.Fatalf("Idle() yielded %d keys, want 0", got)
+	}
+
+	clock.Advance(sec)
+	if got := len(idleKeys(l)); got != n {
+		t.Fatalf("Idle() yielded %d keys, want %d", got, n)
+	}
+	if got := l.Sweep(); got != n {
+		t.Fatalf("Sweep() = %d, want %d", got, n)
+	}
+	if got := l.Size(); got != 0 {
+		t.Fatalf("Size() after Sweep = %d, want 0", got)
+	}
+}

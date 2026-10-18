@@ -6,6 +6,46 @@ import (
 	"time"
 )
 
+// bucketState is the whole mutable state of a token bucket. It is shared by
+// TokenBucket and Limiter, which only differ in how they guard and store it.
+type bucketState struct {
+	tokens int
+	last   time.Time // the moment from which the next token is being "cooked"
+}
+
+// refill adds the tokens earned since b.last. It is a pure function of the state and
+// `now`, so callers may read the clock before taking their lock.
+func (b *bucketState) refill(now time.Time, capacity int, interval time.Duration) {
+	if now.Before(b.last) { // a stale reading taken before another goroutine's update
+		now = b.last
+	}
+	if b.tokens >= capacity {
+		// A full bucket earns nothing: the next token starts "cooking" only
+		// after somebody takes one.
+		b.last = now
+		return
+	}
+	elapsed := now.Sub(b.last)
+	if elapsed < interval {
+		return
+	}
+	n := int64(elapsed / interval)
+	if n >= int64(capacity-b.tokens) {
+		b.tokens = capacity
+		b.last = now
+		return
+	}
+	b.tokens += int(n)
+	// Keep the fractional remainder of the interval instead of dropping it.
+	b.last = b.last.Add(time.Duration(n) * interval)
+}
+
+// isFull reports whether the bucket would be full at `now`, without changing it.
+func (b bucketState) isFull(now time.Time, capacity int, interval time.Duration) bool {
+	b.refill(now, capacity, interval) // b is a copy
+	return b.tokens >= capacity
+}
+
 // TokenBucket allows at most `capacity` operations in a burst and then
 // one more operation every `interval`.
 type TokenBucket struct {
@@ -13,9 +53,8 @@ type TokenBucket struct {
 	capacity int
 	interval time.Duration
 
-	mu     sync.Mutex
-	tokens int
-	last   time.Time // the moment from which the next token is being "cooked"
+	mu sync.Mutex
+	st bucketState
 }
 
 // validateBucket checks the arguments shared by NewTokenBucket and NewLimiter.
@@ -33,62 +72,34 @@ func NewTokenBucket(clock Clock, capacity int, interval time.Duration) (*TokenBu
 	if err := validateBucket(clock, capacity, interval); err != nil {
 		return nil, err
 	}
-	return newTokenBucket(clock, capacity, interval), nil
-}
-
-// newTokenBucket builds a bucket from arguments that are already known to be valid.
-func newTokenBucket(clock Clock, capacity int, interval time.Duration) *TokenBucket {
 	return &TokenBucket{
 		clock:    clock,
 		capacity: capacity,
 		interval: interval,
-		tokens:   capacity,
-		last:     clock.Now(),
-	}
-}
-
-// refill adds the tokens earned since b.last. The caller must hold b.mu.
-func (b *TokenBucket) refill() {
-	now := b.clock.Now()
-	if b.tokens >= b.capacity {
-		// A full bucket earns nothing: the next token starts "cooking" only
-		// after somebody takes one.
-		b.last = now
-		return
-	}
-	elapsed := now.Sub(b.last)
-	if elapsed < b.interval {
-		return
-	}
-	n := int64(elapsed / b.interval)
-	if n >= int64(b.capacity-b.tokens) {
-		b.tokens = b.capacity
-		b.last = now
-		return
-	}
-	b.tokens += int(n)
-	// Keep the fractional remainder of the interval instead of dropping it.
-	b.last = b.last.Add(time.Duration(n) * b.interval)
+		st:       bucketState{tokens: capacity, last: clock.Now()},
+	}, nil
 }
 
 // Allow takes one token if there is one.
 func (b *TokenBucket) Allow() bool {
+	now := b.clock.Now()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.refill()
-	if b.tokens == 0 {
+	b.st.refill(now, b.capacity, b.interval)
+	if b.st.tokens == 0 {
 		return false
 	}
-	b.tokens--
+	b.st.tokens--
 	return true
 }
 
 // Tokens reports how many tokens are available right now, without taking any.
 func (b *TokenBucket) Tokens() int {
+	now := b.clock.Now()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.refill()
-	return b.tokens
+	b.st.refill(now, b.capacity, b.interval)
+	return b.st.tokens
 }
 
 // Do runs op if a token is available and returns op's error as is.

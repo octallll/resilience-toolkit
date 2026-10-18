@@ -1,19 +1,30 @@
 package resilience
 
 import (
+	"hash/maphash"
 	"iter"
 	"sync"
 	"time"
 )
 
-// Limiter keeps an independent TokenBucket for every key.
+// shardCount is the number of independently locked parts of a Limiter. Keys of
+// different shards never contend with each other, and Sweep and Idle work on one
+// shard at a time, so they never stop the whole limiter.
+const shardCount = 64
+
+type shard[K comparable] struct {
+	mu      sync.Mutex
+	buckets map[K]bucketState
+}
+
+// Limiter keeps an independent token bucket for every key.
 type Limiter[K comparable] struct {
 	clock    Clock
 	capacity int
 	interval time.Duration
 
-	mu      sync.Mutex
-	buckets map[K]*TokenBucket
+	seed   maphash.Seed
+	shards [shardCount]shard[K]
 }
 
 // NewLimiter reports invalid arguments exactly like NewTokenBucket does.
@@ -21,24 +32,39 @@ func NewLimiter[K comparable](clock Clock, capacity int, interval time.Duration)
 	if err := validateBucket(clock, capacity, interval); err != nil {
 		return nil, err
 	}
-	return &Limiter[K]{
+	l := &Limiter[K]{
 		clock:    clock,
 		capacity: capacity,
 		interval: interval,
-		buckets:  make(map[K]*TokenBucket),
-	}, nil
+		seed:     maphash.MakeSeed(),
+	}
+	for i := range l.shards {
+		l.shards[i].buckets = make(map[K]bucketState)
+	}
+	return l, nil
+}
+
+func (l *Limiter[K]) shardOf(key K) *shard[K] {
+	return &l.shards[maphash.Comparable(l.seed, key)%shardCount]
 }
 
 // Allow takes a token from the key's bucket, creating a full bucket on first use.
 func (l *Limiter[K]) Allow(key K) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	b, ok := l.buckets[key]
+	now := l.clock.Now() // read outside the lock: the critical section is only a map access
+	s := l.shardOf(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.buckets[key]
 	if !ok {
-		b = newTokenBucket(l.clock, l.capacity, l.interval)
-		l.buckets[key] = b
+		st = bucketState{tokens: l.capacity, last: now}
 	}
-	return b.Allow()
+	st.refill(now, l.capacity, l.interval)
+	allowed := st.tokens > 0
+	if allowed {
+		st.tokens--
+	}
+	s.buckets[key] = st
+	return allowed
 }
 
 // Do runs op if the key has a token, otherwise returns ErrRateLimited.
@@ -50,35 +76,49 @@ func (l *Limiter[K]) Do(key K, op func() error) error {
 }
 
 // Tokens reports the tokens available for key. An unknown key has a full bucket;
-// asking does not create anything.
+// asking does not create or change anything.
 func (l *Limiter[K]) Tokens(key K) int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if b, ok := l.buckets[key]; ok {
-		return b.Tokens()
+	now := l.clock.Now()
+	s := l.shardOf(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.buckets[key] // st is a copy, so refill below does not touch the map
+	if !ok {
+		return l.capacity
 	}
-	return l.capacity
+	st.refill(now, l.capacity, l.interval)
+	return st.tokens
 }
 
-// Size returns the number of keys that currently have a bucket.
+// Size returns the number of keys that currently have a bucket. Shards are counted
+// one after another, so under concurrent use the result is only approximate.
 func (l *Limiter[K]) Size() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.buckets)
+	n := 0
+	for i := range l.shards {
+		s := &l.shards[i]
+		s.mu.Lock()
+		n += len(s.buckets)
+		s.mu.Unlock()
+	}
+	return n
 }
 
 // Sweep deletes the buckets that are full and returns how many were deleted.
 // A full bucket is indistinguishable from a new one, so Sweep never changes
-// the answers of Allow, Do and Tokens.
+// the answers of Allow, Do and Tokens. Shards are locked one at a time.
 func (l *Limiter[K]) Sweep() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	now := l.clock.Now()
 	removed := 0
-	for key, b := range l.buckets {
-		if b.Tokens() == l.capacity {
-			delete(l.buckets, key)
-			removed++
+	for i := range l.shards {
+		s := &l.shards[i]
+		s.mu.Lock()
+		for key, st := range s.buckets {
+			if st.isFull(now, l.capacity, l.interval) {
+				delete(s.buckets, key)
+				removed++
+			}
 		}
+		s.mu.Unlock()
 	}
 	return removed
 }
@@ -86,19 +126,28 @@ func (l *Limiter[K]) Sweep() int {
 // Idle iterates over the keys whose buckets are full, i.e. the keys Sweep would delete.
 // The order is unspecified. The limiter is not locked while the loop body runs,
 // so the body may freely call the limiter's methods.
+//
+// Keys are collected one shard at a time, so memory is proportional to the size of a
+// shard, not of the whole limiter. A key may stop being idle between the moment it is
+// collected and the moment the loop body sees it.
 func (l *Limiter[K]) Idle() iter.Seq[K] {
 	return func(yield func(K) bool) {
-		l.mu.Lock()
+		now := l.clock.Now()
 		var keys []K
-		for key, b := range l.buckets {
-			if b.Tokens() == l.capacity {
-				keys = append(keys, key)
+		for i := range l.shards {
+			s := &l.shards[i]
+			keys = keys[:0]
+			s.mu.Lock()
+			for key, st := range s.buckets {
+				if st.isFull(now, l.capacity, l.interval) {
+					keys = append(keys, key)
+				}
 			}
-		}
-		l.mu.Unlock()
-		for _, key := range keys {
-			if !yield(key) {
-				return
+			s.mu.Unlock()
+			for _, key := range keys {
+				if !yield(key) {
+					return
+				}
 			}
 		}
 	}
