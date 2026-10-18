@@ -176,3 +176,48 @@ func TestConcurrent_FakeClockIsRaceFree(t *testing.T) {
 		}
 	})
 }
+
+// A probe that hangs must not block the recovery forever: after OpenTimeout it is
+// considered lost, a new probe is allowed, and the late result of the old one is ignored.
+func TestConcurrent_LostProbeIsReplacedAfterOpenTimeout(t *testing.T) {
+	clock := resilience.NewFakeClock()
+	b := newBreaker(t, clock, 1, 5*sec, 2)
+	fail(t, b, 1)
+	clock.Advance(5 * sec)
+
+	var early, late error
+	err := b.Do(func() error { // the probe that "hangs"
+		clock.Advance(5*sec - 1)
+		early = b.Do(ok) // not a whole OpenTimeout yet: still the only probe
+		clock.Advance(1)
+		late = b.Do(ok) // exactly OpenTimeout: the probe is lost, this one replaces it
+		return errBoom  // the lost probe finally fails, which must change nothing
+	})
+	if err != errBoom {
+		t.Fatalf("lost probe Do() = %v, want errBoom", err)
+	}
+	if early != resilience.ErrCircuitOpen {
+		t.Errorf("call before the probe timeout = %v, want ErrCircuitOpen", early)
+	}
+	if late != nil {
+		t.Errorf("call after the probe timeout = %v, want nil", late)
+	}
+	// One success from the new probe is recorded; the late failure of the old one is not.
+	wantState(t, b, resilience.HalfOpen)
+	succeed(t, b, 1)
+	wantState(t, b, resilience.Closed)
+}
+
+func TestConcurrent_LateSuccessOfALostProbeIsIgnored(t *testing.T) {
+	clock := resilience.NewFakeClock()
+	b := newBreaker(t, clock, 1, 5*sec, 2)
+	fail(t, b, 1)
+	clock.Advance(5 * sec)
+
+	_ = b.Do(func() error {
+		clock.Advance(5 * sec)
+		_ = b.Do(ok) // the replacement probe: 1 of 2 successes
+		return nil   // the lost one succeeds too, but must not count as the 2nd success
+	})
+	wantState(t, b, resilience.HalfOpen)
+}

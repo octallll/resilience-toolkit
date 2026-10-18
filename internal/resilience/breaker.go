@@ -47,8 +47,9 @@ type CircuitBreaker struct {
 	failures  int // consecutive failures while Closed
 	successes int // consecutive successes while HalfOpen
 	openedAt  time.Time
-	probing   bool   // a probe is in flight (HalfOpen)
-	gen       uint64 // bumped on every state change; stale results are dropped
+	probing   bool      // a probe is in flight (HalfOpen)
+	probeAt   time.Time // when the current probe started; see before
+	gen       uint64    // bumped on every state change; stale results are dropped
 }
 
 // NewCircuitBreaker returns a closed breaker. For invalid arguments it returns an error
@@ -114,10 +115,18 @@ func (c *CircuitBreaker) before() (gen uint64, ok bool) {
 	case Open:
 		return 0, false
 	case HalfOpen:
+		now := c.clock.Now()
 		if c.probing {
-			return 0, false
+			if now.Sub(c.probeAt) < c.cfg.OpenTimeout {
+				return 0, false
+			}
+			// The probe has been running for a whole OpenTimeout: treat it as lost, so a hung
+			// operation cannot keep the breaker from ever recovering. Its late result belongs
+			// to the old generation and will be ignored.
+			c.gen++
 		}
 		c.probing = true
+		c.probeAt = now
 	}
 	return c.gen, true
 }
