@@ -35,7 +35,7 @@ err := policy.Do(func() error { return callExternalService() })
 
 ## Правила
 
-- Разрешены импорты `errors`, `fmt`, `iter`, `math`, `slices`, `sync` и `time` (из `time` только типы и константы).
+- Разрешены импорты `errors`, `fmt`, `hash/maphash`, `iter`, `math`, `slices`, `sync` и `time` (из `time` только типы и константы).
   Пакеты `sort`, `container/*` и сторонние библиотеки запрещены.
 - **Нельзя вызывать `time.Now()` и `time.Sleep()`.** Время берётся только из `Clock`, который передаётся
   в конструктор. Поэтому тесты работают мгновенно: они подставляют `FakeClock`.
